@@ -611,7 +611,7 @@ def _run_search(query: str, limit: int) -> tuple[list[SearchResult], list[str]]:
     providers = _provider_order()
     if not providers:
         return [], ["no search provider configured; configure Tavily, Brave, SearXNG, or enable no-key fallback"]
-    for provider in providers:
+    for index, provider in enumerate(providers):
         try:
             if provider in NO_KEY_PROVIDERS and not config.ALLOW_BING_FALLBACK:
                 raise SearchError("no-key fallback is disabled")
@@ -640,7 +640,8 @@ def _run_search(query: str, limit: int) -> tuple[list[SearchResult], list[str]]:
         except SearchProviderAuthError as exc:
             errors.append(f"{provider}: authentication or permission failed: {exc}")
             logger.warning(f"星巡搜索 provider {provider} authentication failed: {exc}")
-            if provider in FORMAL_PROVIDERS:
+            has_later_formal_provider = any(item in FORMAL_PROVIDERS for item in providers[index + 1 :])
+            if provider in FORMAL_PROVIDERS and not has_later_formal_provider:
                 break
         except Exception as exc:
             errors.append(f"{provider}: {exc}")

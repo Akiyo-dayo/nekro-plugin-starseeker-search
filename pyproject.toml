@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "nekro-plugin-starseeker-search"
-version = "0.1.1"
+version = "0.1.2"
 description = "Starseeker Search for Nekro Agent"
 authors = ["Akiyo_Codex"]
 readme = "README.md"

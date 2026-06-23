@@ -27,9 +27,9 @@ plugin = NekroPlugin(
     name="星巡搜索",
     module_name="nekro_plugin_starseeker_search",
     description="像巡航星图一样为 Agent 探索互联网，支持 Brave、Tavily、SearXNG 与零配置 fallback。",
-    version="0.1.1",
+    version="0.1.2",
     author="Akiyo_Codex",
-    url="",
+    url="https://github.com/Akiyo-dayo/nekro-plugin-starseeker-search",
 )
 
 

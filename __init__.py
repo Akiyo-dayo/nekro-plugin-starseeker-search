@@ -27,7 +27,7 @@ plugin = NekroPlugin(
     name="星巡搜索",
     module_name="nekro_plugin_starseeker_search",
     description="像巡航星图一样为 Agent 探索互联网，支持 Brave、Tavily、SearXNG 与零配置 fallback。",
-    version="0.1.0",
+    version="0.1.1",
     author="Akiyo_Codex",
     url="",
 )
@@ -45,7 +45,7 @@ class StarseekerSearchConfig(ConfigBase):
     BRAVE_API_KEY: str = Field(
         default="",
         title="Brave Search API Key",
-        description="Brave Search API 的订阅密钥，配置后优先使用 Brave。",
+        description="Brave Search API 的订阅密钥。",
     )
     TAVILY_API_KEY: str = Field(
         default="",
@@ -61,7 +61,7 @@ class StarseekerSearchConfig(ConfigBase):
     TIMEOUT_SECONDS: int = Field(default=12, title="请求超时秒数", ge=3, le=60)
     ALLOW_BING_FALLBACK: bool = Field(
         default=True,
-        title="允许 Bing 兜底",
+        title="允许无 Key 兜底",
         description="没有正式 API 配置或正式 API 失败时，允许使用无 Key 搜索源兜底。",
     )
 
@@ -79,6 +79,14 @@ class SearchResult:
 
 class SearchError(RuntimeError):
     pass
+
+
+class SearchProviderAuthError(SearchError):
+    pass
+
+
+FORMAL_PROVIDERS = {"brave", "tavily", "searxng"}
+NO_KEY_PROVIDERS = {"duckduckgo", "bing", "fallback"}
 
 
 LOW_VALUE_DOMAINS = (
@@ -103,6 +111,26 @@ QUERY_STOPWORDS = {
     "有没有",
     "是否",
     "什么时候",
+    "the",
+    "and",
+    "for",
+    "from",
+    "with",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "how",
+    "is",
+    "are",
+    "was",
+    "were",
+    "this",
+    "that",
+    "today",
+    "latest",
 }
 
 
@@ -146,7 +174,10 @@ def _http_text(
             return response.read().decode(charset, errors="replace")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")[:300]
-        raise SearchError(f"HTTP {exc.code}: {body}") from exc
+        message = f"HTTP {exc.code}: {body}"
+        if exc.code in {401, 403}:
+            raise SearchProviderAuthError(message) from exc
+        raise SearchError(message) from exc
     except Exception as exc:
         raise SearchError(f"{type(exc).__name__}: {exc}") from exc
 
@@ -259,15 +290,7 @@ def _score_result(query: str, item: SearchResult) -> float:
 
 
 def _rank_and_filter_results(query: str, candidates: list[SearchResult], limit: int) -> list[SearchResult]:
-    seen = set()
-    unique = []
-    for item in candidates:
-        clean_url = item.url.split("#", 1)[0]
-        if not clean_url.startswith("http") or clean_url in seen:
-            continue
-        seen.add(clean_url)
-        unique.append(SearchResult(item.title, clean_url, item.snippet, item.source))
-
+    unique = _normalize_results(candidates, len(candidates))
     scored = sorted(
         ((item, _score_result(query, item)) for item in unique),
         key=lambda pair: pair[1],
@@ -287,6 +310,20 @@ def _rank_and_filter_results(query: str, candidates: list[SearchResult], limit: 
     if not filtered and scored[0][1] >= threshold - 1.5:
         filtered = [scored[0][0]]
     return filtered[:limit]
+
+
+def _normalize_results(candidates: list[SearchResult], limit: int) -> list[SearchResult]:
+    seen = set()
+    unique = []
+    for item in candidates:
+        clean_url = item.url.split("#", 1)[0]
+        if not clean_url.startswith("http") or clean_url in seen:
+            continue
+        seen.add(clean_url)
+        unique.append(SearchResult(item.title, clean_url, item.snippet, item.source))
+        if len(unique) >= limit:
+            break
+    return unique
 
 
 def _search_brave(query: str, limit: int, timeout: int) -> list[SearchResult]:
@@ -342,6 +379,8 @@ def _search_tavily(query: str, limit: int, timeout: int) -> list[SearchResult]:
             payload=payload,
             timeout=timeout,
         )
+    except SearchProviderAuthError:
+        raise
     except SearchError:
         payload_with_key = dict(payload)
         payload_with_key["api_key"] = config.TAVILY_API_KEY.strip()
@@ -454,6 +493,8 @@ def _search_360(query: str, limit: int, timeout: int) -> list[SearchResult]:
 
 
 def _search_bing_rss(query: str, limit: int, timeout: int) -> list[SearchResult]:
+    if not config.ALLOW_BING_FALLBACK:
+        raise SearchError("no-key fallback is disabled")
     params = urllib.parse.urlencode({"q": query, "format": "rss"})
     text = _http_text(f"https://www.bing.com/search?{params}", timeout=timeout)
     try:
@@ -483,7 +524,7 @@ def _extract_bing_blocks(page: str) -> list[str]:
 
 def _search_bing_fallback(query: str, limit: int, timeout: int) -> list[SearchResult]:
     if not config.ALLOW_BING_FALLBACK:
-        raise SearchError("Bing fallback is disabled")
+        raise SearchError("no-key fallback is disabled")
     params = urllib.parse.urlencode({"q": query, "count": min(limit, 10)})
     page = _http_text(f"https://cn.bing.com/search?{params}", timeout=timeout)
     results = []
@@ -505,6 +546,8 @@ def _search_bing_fallback(query: str, limit: int, timeout: int) -> list[SearchRe
 
 
 def _search_fallback(query: str, limit: int, timeout: int) -> list[SearchResult]:
+    if not config.ALLOW_BING_FALLBACK:
+        raise SearchError("no-key fallback is disabled")
     errors = []
     candidates = []
     if _contains_cjk(query):
@@ -551,22 +594,27 @@ def _provider_order() -> list[str]:
     if provider and provider != "auto":
         return [provider]
     order = []
-    if config.BRAVE_API_KEY.strip():
-        order.append("brave")
     if config.TAVILY_API_KEY.strip():
         order.append("tavily")
+    if config.BRAVE_API_KEY.strip():
+        order.append("brave")
     if config.SEARXNG_BASE_URL.strip():
         order.append("searxng")
     if config.ALLOW_BING_FALLBACK:
         order.append("fallback")
-    return order or ["fallback"]
+    return order
 
 
 def _run_search(query: str, limit: int) -> tuple[list[SearchResult], list[str]]:
     timeout = max(3, min(int(config.TIMEOUT_SECONDS), 60))
     errors = []
-    for provider in _provider_order():
+    providers = _provider_order()
+    if not providers:
+        return [], ["no search provider configured; configure Tavily, Brave, SearXNG, or enable no-key fallback"]
+    for provider in providers:
         try:
+            if provider in NO_KEY_PROVIDERS and not config.ALLOW_BING_FALLBACK:
+                raise SearchError("no-key fallback is disabled")
             if provider == "brave":
                 results = _search_brave(query, limit, timeout)
             elif provider == "tavily":
@@ -582,10 +630,18 @@ def _run_search(query: str, limit: int) -> tuple[list[SearchResult], list[str]]:
                 results = _search_fallback(query, limit, timeout)
             else:
                 raise SearchError(f"Unknown provider: {provider}")
-            ranked_results = _rank_and_filter_results(query, results, limit)
+            if provider in FORMAL_PROVIDERS:
+                ranked_results = _normalize_results(results, limit)
+            else:
+                ranked_results = _rank_and_filter_results(query, results, limit)
             if ranked_results:
                 return ranked_results, errors
             errors.append(f"{provider}: no relevant results")
+        except SearchProviderAuthError as exc:
+            errors.append(f"{provider}: authentication or permission failed: {exc}")
+            logger.warning(f"星巡搜索 provider {provider} authentication failed: {exc}")
+            if provider in FORMAL_PROVIDERS:
+                break
         except Exception as exc:
             errors.append(f"{provider}: {exc}")
             logger.warning(f"星巡搜索 provider {provider} failed: {exc}")
@@ -596,8 +652,11 @@ def _format_results(query: str, results: list[SearchResult], errors: list[str]) 
     if not results:
         details = "\n".join(f"- {error}" for error in errors[-5:])
         return f"星巡搜索没有找到 `{query}` 的可用结果。\n{details}".strip()
-    source = results[0].source
-    lines = [f"星巡搜索结果：{query}", f"来源：{source}", ""]
+    sources = "、".join(dict.fromkeys(item.source for item in results))
+    lines = [f"星巡搜索结果：{query}", f"来源：{sources}"]
+    if errors:
+        lines.append("降级提示：" + "；".join(errors[-3:]))
+    lines.append("")
     for index, item in enumerate(results, start=1):
         lines.append(f"{index}. {item.title}")
         if item.snippet:

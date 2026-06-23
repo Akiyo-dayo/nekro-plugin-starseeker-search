@@ -49,14 +49,18 @@ web_search(query: str, max_results: int = 5) -> str
 | `SEARXNG_BASE_URL` | 空 | 自建 SearXNG 地址，例如 `https://search.example.com`。实例需要开放 JSON 搜索。 |
 | `MAX_RESULTS` | `5` | 默认返回结果数量，范围 `1-10`。 |
 | `TIMEOUT_SECONDS` | `12` | 单次请求超时时间，范围 `3-60` 秒。 |
-| `ALLOW_BING_FALLBACK` | `true` | 允许无 key fallback。名称沿用旧配置，实际 fallback 会组合多个公开网页搜索入口。 |
+| `ALLOW_BING_FALLBACK` | `true` | 允许无 key fallback。名称沿用旧配置，实际作为无 key 搜索源的总开关。 |
 
 `PROVIDER=auto` 的行为：
 
-- 有 `BRAVE_API_KEY` 时尝试 Brave。
 - 有 `TAVILY_API_KEY` 时尝试 Tavily。
+- 有 `BRAVE_API_KEY` 时尝试 Brave。
 - 有 `SEARXNG_BASE_URL` 时尝试 SearXNG。
 - 如果允许 fallback，再尝试无 key fallback。
+
+正式 API 返回的结果会保留服务端排序，仅做 URL 去重和基础可用性检查。无 key fallback 返回的网页抓取结果会额外经过相关性过滤。
+
+当正式 API 返回认证或权限错误，例如无效 key、过期 key、订阅权限不足或 `401/403`，插件会直接返回明确错误，不会静默降级到无 key fallback。普通网络故障或临时服务错误在 `auto` 模式下可以继续尝试后续搜索源；如果最终由 fallback 返回结果，输出中会包含降级提示。
 
 ## 无 Key Fallback
 
@@ -107,6 +111,12 @@ web_search(query="OpenAI latest model news", max_results=5)
 2. 当前 `PROVIDER` 是否被固定为 `bing` 或 `fallback`。
 3. 查询词是否太宽泛。建议包含关键实体和限定词。
 4. 是否依赖无 key fallback。无 key fallback 不保证稳定结果质量。
+
+如果已配置正式 API 但返回中出现无 key 来源，先检查输出中的降级提示。认证或权限错误会阻止静默降级；普通网络错误、超时或服务端临时错误可能触发后续 provider。
+
+### 正式 API 返回认证或权限错误
+
+检查对应服务的 key 是否有效、是否已启用搜索权限、是否超出套餐限制，以及容器配置是否已保存并在重启后生效。插件不会输出 key 内容；排查时只需要确认 key 是否存在、长度是否符合预期、服务端是否接受该 key。
 
 ### DuckDuckGo 报 TLS 错误
 
